@@ -1,0 +1,24 @@
+# Build output
+/build/
+/bin/
+/out/
+/tests/cefclient/
+/tests/shared/
+/tests/.cef-version
+
+# Runtime state / credentials / browsing data
+/set.ini
+/runtime/
+/capture/
+*.log
+*.tmp
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.VC.db
+
+# CEF SDK downloads/extraction
+third_party/cef/
+cef_binary_*/
