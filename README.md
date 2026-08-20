@@ -20,6 +20,7 @@ This repository intentionally records not only the current solution but also the
 **Start here if you are an AI agent or a new maintainer:**
 
 - [`docs/AI_HANDOFF.md`](docs/AI_HANDOFF.md) — current invariants, known-good architecture and rules for future changes.
+- [`docs/KNOWN_GOOD_BASELINE.md`](docs/KNOWN_GOOD_BASELINE.md) — what is actually verified versus still under investigation.
 - [`docs/LESSONS_LEARNED.md`](docs/LESSONS_LEARNED.md) — failed approaches and debugging lessons.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current runtime and source-tree design.
 
