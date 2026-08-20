@@ -1,0 +1,165 @@
+param(
+  [string]$ProjectRoot,
+  [string]$CefRoot,
+  [switch]$ForceSync
+)
+
+$ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) { $ProjectRoot = $env:PERSONALCEF_PROJECT_ROOT }
+if ([string]::IsNullOrWhiteSpace($CefRoot)) { $CefRoot = $env:PERSONALCEF_CEF_ROOT }
+if (!$ForceSync -and $env:PERSONALCEF_FORCE_SYNC -eq '1') { $ForceSync = $true }
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) { throw 'ProjectRoot is not set.' }
+if ([string]::IsNullOrWhiteSpace($CefRoot)) { throw 'CefRoot is not set.' }
+
+$ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
+$CefRoot = [IO.Path]::GetFullPath($CefRoot)
+$Utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+
+function Read-Lf([string]$Path) {
+  if (!(Test-Path -LiteralPath $Path)) { throw "Missing file: $Path" }
+  return ([IO.File]::ReadAllText($Path)).Replace("`r`n", "`n").Replace("`r", "`n")
+}
+function Write-Utf8([string]$Path, [string]$Text) {
+  [IO.File]::WriteAllText($Path, $Text, $script:Utf8NoBom)
+}
+function Patch-Once([string]$Path, [string]$Marker, [string]$Search, [string]$Replacement) {
+  $text = Read-Lf $Path
+  if ($text.Contains($Marker)) { Write-Host "[already] $Path"; return }
+  $count = ([regex]::Matches($text, [regex]::Escape($Search))).Count
+  if ($count -ne 1) {
+    throw "CEF upstream changed near patch '$Marker'. Expected 1 match, got $count.`nFile: $Path`nThis is an adapter/update issue, not a compiler issue."
+  }
+  $text = $text.Replace($Search, $Replacement)
+  Write-Utf8 $Path $text
+  Write-Host "[patched] $Path"
+}
+
+$version = (Get-Content -LiteralPath (Join-Path $ProjectRoot 'CEF-VERSION.txt') -Raw).Trim()
+if ([string]::IsNullOrWhiteSpace($version)) { throw 'CEF-VERSION.txt is empty.' }
+$versionHeader = Join-Path $CefRoot 'include\cef_version.h'
+if (!(Test-Path -LiteralPath $versionHeader)) { throw "Invalid CEF_ROOT: $CefRoot" }
+if (!(Read-Lf $versionHeader).Contains($version)) {
+  throw "CEF version mismatch. CEF-VERSION.txt=$version but cef_version.h is different."
+}
+
+$cefClientDir = Join-Path $ProjectRoot 'tests\cefclient'
+$sharedDir = Join-Path $ProjectRoot 'tests\shared'
+$stateFile = Join-Path $ProjectRoot 'tests\.cef-version'
+$current = if (Test-Path -LiteralPath $stateFile) { (Get-Content $stateFile -Raw).Trim() } else { '' }
+
+if ($ForceSync -or $current -ne $version -or !(Test-Path -LiteralPath (Join-Path $cefClientDir 'CMakeLists.txt'))) {
+  Write-Host "[sync] Official cefclient framework -> project source ($version)" -ForegroundColor Cyan
+  if (Test-Path -LiteralPath $cefClientDir) { Remove-Item -LiteralPath $cefClientDir -Recurse -Force }
+  if (Test-Path -LiteralPath $sharedDir) { Remove-Item -LiteralPath $sharedDir -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path (Split-Path $cefClientDir -Parent) | Out-Null
+  Copy-Item -LiteralPath (Join-Path $CefRoot 'tests\cefclient') -Destination $cefClientDir -Recurse -Force
+  Copy-Item -LiteralPath (Join-Path $CefRoot 'tests\shared') -Destination $sharedDir -Recurse -Force
+  Set-Content -LiteralPath $stateFile -Value $version -Encoding ASCII
+  if (Test-Path -LiteralPath (Join-Path $CefRoot 'LICENSE.txt')) {
+    Copy-Item -LiteralPath (Join-Path $CefRoot 'LICENSE.txt') -Destination (Join-Path $ProjectRoot 'CEF-LICENSE.txt') -Force
+  }
+}
+
+# PersonalCEF r10: personal\ is the ONE AND ONLY personal source tree.
+# Do NOT copy it into tests\cefclient. VS2022 compiles these files directly,
+# so edits made in Visual Studio can never be overwritten by a later sync.
+$personalSrc = Join-Path $ProjectRoot 'personal'
+if (!(Test-Path -LiteralPath (Join-Path $personalSrc 'personal_runtime.cpp'))) {
+  throw "Canonical personal source is missing: $personalSrc"
+}
+
+# App icon and manifest name belong to our application, not the CEF SDK.
+$iconSource = Join-Path $ProjectRoot 'resources\PersonalCEF.ico'
+Copy-Item -LiteralPath $iconSource -Destination (Join-Path $cefClientDir 'win\cefclient.ico') -Force
+Copy-Item -LiteralPath $iconSource -Destination (Join-Path $cefClientDir 'win\small.ico') -Force
+$cefManifest = Join-Path $cefClientDir 'win\cefclient.exe.manifest'
+$personalManifest = Join-Path $cefClientDir 'win\PersonalCEF.exe.manifest'
+if (Test-Path -LiteralPath $cefManifest) { Copy-Item -LiteralPath $cefManifest -Destination $personalManifest -Force }
+
+# ---------------------------------------------------------------------------
+# CMake adapter: make this one clean application target.
+# ---------------------------------------------------------------------------
+$path = Join-Path $cefClientDir 'CMakeLists.txt'
+Patch-Once $path 'PERSONALCEF_R9_TARGET_NAME' 'set(CEF_TARGET "cefclient")' @'
+# PERSONALCEF_R9_TARGET_NAME
+set(CEF_TARGET "PersonalCEF")
+'@
+
+Patch-Once $path 'PERSONALCEF_R9_OUTPUT_DIR' @'
+# Determine the target output directory.
+SET_CEF_TARGET_OUT_DIR()
+'@ @'
+# Determine the target output directory.
+SET_CEF_TARGET_OUT_DIR()
+# PERSONALCEF_R9_OUTPUT_DIR
+# Keep all runtime files outside the CMake/OBJ tree. Debug and Release are
+# independently runnable and debuggable.
+if(OS_WINDOWS)
+  set(CEF_TARGET_OUT_DIR "${PERSONALCEF_OUTPUT_DIR}/$<CONFIGURATION>")
+endif()
+'@
+
+Patch-Once $path 'PERSONALCEF_R9_CMAKE_SOURCES_BEGIN' @'
+if(OS_WINDOWS)
+  # All sources required by the "cefclient" target. Generates an executable that
+'@ @'
+if(OS_WINDOWS)
+  # PERSONALCEF_R9_CMAKE_SOURCES_BEGIN
+  set(PERSONALCEF_R9_SRCS
+    "${CMAKE_SOURCE_DIR}/personal/config.cpp"
+    "${CMAKE_SOURCE_DIR}/personal/config.h"
+    "${CMAKE_SOURCE_DIR}/personal/mail_service.cpp"
+    "${CMAKE_SOURCE_DIR}/personal/mail_service.h"
+    "${CMAKE_SOURCE_DIR}/personal/market_data.cpp"
+    "${CMAKE_SOURCE_DIR}/personal/market_data.h"
+    "${CMAKE_SOURCE_DIR}/personal/network_capture.cpp"
+    "${CMAKE_SOURCE_DIR}/personal/network_capture.h"
+    "${CMAKE_SOURCE_DIR}/personal/personal_runtime.cpp"
+    "${CMAKE_SOURCE_DIR}/personal/personal_runtime.h"
+    "${CMAKE_SOURCE_DIR}/personal/personal_tray_win.cpp"
+    "${CMAKE_SOURCE_DIR}/personal/personal_tray_win.h"
+    "${CMAKE_SOURCE_DIR}/personal/personal_chrome_handler.cpp"
+    "${CMAKE_SOURCE_DIR}/personal/personal_chrome_handler.h"
+    "${CMAKE_SOURCE_DIR}/personal/scheduler.cpp"
+    "${CMAKE_SOURCE_DIR}/personal/scheduler.h"
+    "${CMAKE_SOURCE_DIR}/personal/util.cpp"
+    "${CMAKE_SOURCE_DIR}/personal/util.h"
+  )
+  list(APPEND CEFCLIENT_WINDOWS_SRCS ${PERSONALCEF_R9_SRCS})
+  # PERSONALCEF_R9_CMAKE_SOURCES_END
+
+  # All sources required by the "cefclient" target. Generates an executable that
+'@
+
+Patch-Once $path 'PERSONALCEF_R9_CMAKE_TARGET_BEGIN' @'
+  target_link_libraries(${CEF_TARGET} libcef_lib libcef_dll_wrapper ${CEF_STANDARD_LIBS} d3d11.lib glu32.lib imm32.lib opengl32.lib)
+'@ @'
+  target_link_libraries(${CEF_TARGET} libcef_lib libcef_dll_wrapper ${CEF_STANDARD_LIBS} d3d11.lib glu32.lib imm32.lib opengl32.lib)
+
+  # PERSONALCEF_R9_CMAKE_TARGET_BEGIN
+  # Put our generated project tree before CEF_ROOT so "tests/cefclient/..."
+  # includes resolve to this synced cefclient, not the untouched SDK copy.
+  target_include_directories(${CEF_TARGET} BEFORE PRIVATE
+    "${CMAKE_SOURCE_DIR}"
+    "${CMAKE_SOURCE_DIR}/personal"
+  )
+  target_link_libraries(${CEF_TARGET} shell32.lib advapi32.lib dwmapi.lib comctl32.lib)
+  set_target_properties(${CEF_TARGET} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${PERSONALCEF_OUTPUT_DIR}/Debug"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${PERSONALCEF_OUTPUT_DIR}/Release"
+    VS_DEBUGGER_COMMAND "$<TARGET_FILE:${CEF_TARGET}>"
+    VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:${CEF_TARGET}>"
+  )
+  add_custom_command(TARGET ${CEF_TARGET} POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+            "-DSRC=${CMAKE_SOURCE_DIR}/set.default.ini"
+            "-DDST=${CEF_TARGET_OUT_DIR}/set.ini"
+            -P "${CMAKE_SOURCE_DIR}/cmake/CopyIfMissing.cmake"
+    VERBATIM
+  )
+  # PERSONALCEF_R9_CMAKE_TARGET_END
+'@
+
+# ---------------------------------------------------------------------------
+# 2) Official Windows entry point: keep startup/message-loop selection exactly;

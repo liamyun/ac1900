@@ -1,0 +1,160 @@
+    // Do not let cefclient wrap popup/new-tab requests in RootWindow. Let the
+    // native Chrome runtime own tab/window disposition exactly like Chromium.
+    command_line->AppendSwitch("use-default-popup");
+
+    // Append Chromium command line parameters if touch events are enabled
+'@
+Patch-Once $path 'PERSONALCEF_R8_BROWSER_COMMAND_LINE' $search $replace
+
+
+$search = @'
+    // Default client handler for unmanaged browser windows. Used with
+    // Chrome style only.
+    LOG(INFO) << "Creating a chrome browser with the default client";
+    return new DefaultClientHandler();
+'@
+$replace = @'
+    // PERSONALCEF_R11_DEFAULT_CLIENT
+    // Every native Chrome-created tab/window uses the same PersonalCEF browser
+    // services while the actual UI remains 100% CEF/Chromium-owned.
+    LOG(INFO) << "Creating a chrome browser with PersonalCEF services";
+    return personal::PersonalChromeHandler::GetShared();
+'@
+Patch-Once $path 'PERSONALCEF_R11_DEFAULT_CLIENT' $search $replace
+
+# ---------------------------------------------------------------------------
+# 4) Extend the official ClientHandler resource callbacks. Popup, focus,
+#    renderer recovery, message routing and browser lifetime remain official.
+# ---------------------------------------------------------------------------
+
+$path = Join-Path $cefClientDir 'browser\client_handler.h'
+
+$search = @'
+  // CefResourceRequestHandler methods
+  void OnProtocolExecution(CefRefPtr<CefBrowser> browser,
+'@
+$replace = @'
+  // CefResourceRequestHandler methods
+  // PERSONALCEF_R8_RESOURCE_DECLARATIONS_BEGIN
+  cef_return_value_t OnBeforeResourceLoad(
+      CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefFrame> frame,
+      CefRefPtr<CefRequest> request,
+      CefRefPtr<CefCallback> callback) override;
+  CefRefPtr<CefResponseFilter> GetResourceResponseFilter(
+      CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefFrame> frame,
+      CefRefPtr<CefRequest> request,
+      CefRefPtr<CefResponse> response) override;
+  void OnResourceLoadComplete(
+      CefRefPtr<CefBrowser> browser,
+      CefRefPtr<CefFrame> frame,
+      CefRefPtr<CefRequest> request,
+      CefRefPtr<CefResponse> response,
+      CefResourceRequestHandler::URLRequestStatus status,
+      int64_t received_content_length) override;
+  // PERSONALCEF_R8_RESOURCE_DECLARATIONS_END
+  void OnProtocolExecution(CefRefPtr<CefBrowser> browser,
+'@
+Patch-Once $path 'PERSONALCEF_R8_RESOURCE_DECLARATIONS_BEGIN' $search $replace
+
+
+$path = Join-Path $cefClientDir 'browser\client_handler.cc'
+$search = '#include "tests/cefclient/browser/root_window_manager.h"'
+$replace = @'
+#include "tests/cefclient/browser/root_window_manager.h"
+#include "personal/personal_runtime.h"  // PERSONALCEF_R8_HANDLER_INCLUDE
+'@
+Patch-Once $path 'PERSONALCEF_R8_HANDLER_INCLUDE' $search $replace
+
+
+$search = @'
+  BaseClientHandler::OnAfterCreated(browser);
+
+  // Set offline mode if requested via the command-line flag.
+'@
+$replace = @'
+  BaseClientHandler::OnAfterCreated(browser);
+
+  // PERSONALCEF_R8_BROWSER_CREATED
+  personal::Runtime::Get().OnBrowserCreated(browser);
+
+  // Set offline mode if requested via the command-line flag.
+'@
+Patch-Once $path 'PERSONALCEF_R8_BROWSER_CREATED' $search $replace
+
+$search = @'
+  BaseClientHandler::OnBeforeClose(browser);
+  NotifyBrowserClosed(browser);
+'@
+$replace = @'
+  // PERSONALCEF_R8_BROWSER_CLOSED
+  personal::Runtime::Get().OnBrowserClosed(browser);
+
+  BaseClientHandler::OnBeforeClose(browser);
+  NotifyBrowserClosed(browser);
+'@
+Patch-Once $path 'PERSONALCEF_R8_BROWSER_CLOSED' $search $replace
+
+$search = @'
+CefRefPtr<CefResourceRequestHandler> ClientHandler::GetResourceRequestHandler(
+'@
+$replace = @'
+// PERSONALCEF_R8_RESOURCE_IMPLEMENTATION_BEGIN
+cef_return_value_t ClientHandler::OnBeforeResourceLoad(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefFrame> frame,
+    CefRefPtr<CefRequest> request,
+    CefRefPtr<CefCallback> callback) {
+  CEF_REQUIRE_IO_THREAD();
+  personal::Runtime::Get().OnBeforeResourceLoad(request);
+
+  // Preserve cefclient's ResourceManager behavior exactly.
+  return BaseClientHandler::OnBeforeResourceLoad(browser, frame, request,
+                                                 callback);
+}
+
+CefRefPtr<CefResponseFilter> ClientHandler::GetResourceResponseFilter(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefFrame> frame,
+    CefRefPtr<CefRequest> request,
+    CefRefPtr<CefResponse> response) {
+  CEF_REQUIRE_IO_THREAD();
+
+  // Official cefclient test filters have priority. Our capture filter is only
+  // installed when cefclient itself does not need one.
+  if (auto official_filter = BaseClientHandler::GetResourceResponseFilter(
+          browser, frame, request, response)) {
+    return official_filter;
+  }
+  return personal::Runtime::Get().GetResponseFilter(request, response);
+}
+
+void ClientHandler::OnResourceLoadComplete(
+    CefRefPtr<CefBrowser> browser,
+    CefRefPtr<CefFrame> frame,
+    CefRefPtr<CefRequest> request,
+    CefRefPtr<CefResponse> response,
+    CefResourceRequestHandler::URLRequestStatus status,
+    int64_t received_content_length) {
+  CEF_REQUIRE_IO_THREAD();
+  personal::Runtime::Get().OnResourceLoadComplete(
+      request, response, status, received_content_length);
+}
+// PERSONALCEF_R8_RESOURCE_IMPLEMENTATION_END
+
+CefRefPtr<CefResourceRequestHandler> ClientHandler::GetResourceRequestHandler(
+'@
+Patch-Once $path 'PERSONALCEF_R8_RESOURCE_IMPLEMENTATION_BEGIN' $search $replace
+
+
+# ---------------------------------------------------------------------------
+# 5) r11 intentionally leaves official ViewsWindow untouched.
+#    Main UI is the unmanaged CEF Chrome-style window created above.
+# ---------------------------------------------------------------------------
+
+Write-Host ''
+Write-Host 'PersonalCEF cefclient framework prepared successfully.' -ForegroundColor Green
+Write-Host "CEF SDK (untouched): $CefRoot"
+Write-Host "Generated cefclient:  $cefClientDir"
+Write-Host 'Architecture: native CEF Chrome-style window + PersonalChromeHandler; no custom tab UI.'

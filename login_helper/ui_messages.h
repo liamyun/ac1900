@@ -1,0 +1,9 @@
+#pragma once
+#include <windows.h>
+
+constexpr UINT WM_APP_BROWSER_CREATED = WM_APP + 10;
+constexpr UINT WM_APP_ADDRESS_CHANGED = WM_APP + 11;
+constexpr UINT WM_APP_TITLE_CHANGED = WM_APP + 12;
+constexpr UINT WM_APP_LOADING_CHANGED = WM_APP + 13;
+constexpr UINT WM_APP_BROWSER_CLOSED = WM_APP + 14;
+constexpr UINT WM_APP_RESTORE_WINDOW = WM_APP + 15;

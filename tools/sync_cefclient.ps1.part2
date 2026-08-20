@@ -1,0 +1,165 @@
+#    only load our INI before the official context reads switches, and shut our
+#    workers down after the official loop exits but before CEF shutdown.
+# ---------------------------------------------------------------------------
+$path = Join-Path $cefClientDir 'cefclient_win.cc'
+$search = '#include "tests/cefclient/browser/main_context_impl.h"'
+$replace = @'
+#include "tests/cefclient/browser/main_context_impl.h"
+#include "personal/personal_runtime.h"  // PERSONALCEF_R8_WINMAIN_INCLUDE
+#include "personal/personal_tray_win.h"  // PERSONALCEF_R10_INSTANCE_HEADER
+#include "personal/personal_chrome_handler.h"  // PERSONALCEF_R11_NATIVE_CHROME
+'@
+Patch-Once $path 'PERSONALCEF_R8_WINMAIN_INCLUDE' $search $replace
+
+$search = '  ClientApp::ProcessType process_type = ClientApp::GetProcessType(command_line);'
+$replace = @'
+  ClientApp::ProcessType process_type = ClientApp::GetProcessType(command_line);
+  // PERSONALCEF_R8_LOCAL_COMMAND_LINE
+  // MainContextImpl reads this local command line before CefInitialize, so put
+  // URL/cache/UI settings here. Chromium switches are also applied from the
+  // official ClientAppBrowser delegate below.
+  if (process_type == ClientApp::BrowserProcess) {
+    personal::Runtime::Get().ConfigureCommandLine(command_line);
+  }
+'@
+Patch-Once $path 'PERSONALCEF_R8_LOCAL_COMMAND_LINE' $search $replace
+
+$search = @'
+  if (exit_code >= 0) {
+    return exit_code;
+  }
+
+  // Create the main context object.
+'@
+$replace = @'
+  if (exit_code >= 0) {
+    return exit_code;
+  }
+
+  // PERSONALCEF_R10_BROWSER_INSTANCE_GUARD
+  // CefExecuteProcess has already consumed renderer/GPU/utility subprocesses.
+  // Only the real browser process reaches this guard, so child processes are
+  // never mistaken for a second application instance.
+  if (process_type == ClientApp::BrowserProcess &&
+      !personal::TrayController::Get().AcquireSingleInstance()) {
+    return CEF_RESULT_CODE_NORMAL_EXIT;
+  }
+
+  // Create the main context object.
+'@
+Patch-Once $path 'PERSONALCEF_R10_BROWSER_INSTANCE_GUARD' $search $replace
+
+$search = @'
+  // Shut down CEF.
+  context->Shutdown();
+'@
+$replace = @'
+  // PERSONALCEF_R8_SHUTDOWN_BEGIN
+  // The official RootWindowManager has already ended the main loop here. Stop
+  // only tasks that could create new Browser/RootWindow instances. Keep
+  // response/capture objects alive while CefShutdown drains CEF callbacks.
+  personal::Runtime::Get().PrepareForCefShutdown();
+
+  // Shut down CEF.
+  context->Shutdown();
+
+  // CEF callbacks are now finished; release the remaining personal services.
+  personal::Runtime::Get().Shutdown();
+  // PERSONALCEF_R8_SHUTDOWN_END
+'@
+Patch-Once $path 'PERSONALCEF_R8_SHUTDOWN_BEGIN' $search $replace
+
+# ---------------------------------------------------------------------------
+# 2.2) r11 main window: use CEF's own unmanaged Chrome-style window.
+#      No PersonalCEF RootWindow/ViewsWindow/Tab implementation is involved.
+# ---------------------------------------------------------------------------
+$path = Join-Path $cefClientDir 'cefclient_win.cc'
+$search = @'
+  auto window_config = std::make_unique<RootWindowConfig>();
+  window_config->always_on_top =
+      command_line->HasSwitch(switches::kAlwaysOnTop);
+  window_config->with_osr =
+      settings.windowless_rendering_enabled ? true : false;
+
+  // Create the first window.
+  context->GetRootWindowManager()->CreateRootWindow(std::move(window_config));
+'@
+$replace = @'
+  // PERSONALCEF_R11_NATIVE_CHROME_MAIN
+  // Use the same CEF Chrome-style path that creates the native Chromium frame
+  // (tab strip, + button, omnibox, menu, Ctrl+T/Ctrl+W, tab dragging, etc.).
+  // PersonalCEF keeps only browser-level services and tray/single-instance code.
+  CefWindowInfo window_info;
+  window_info.runtime_style = CEF_RUNTIME_STYLE_CHROME;
+
+  CefBrowserSettings browser_settings;
+  context->PopulateBrowserSettings(&browser_settings);
+
+  const std::string startup_url = context->GetMainURL(command_line);
+  CefBrowserHost::CreateBrowser(
+      window_info, personal::PersonalChromeHandler::GetShared(), startup_url,
+      browser_settings, nullptr, nullptr);
+'@
+Patch-Once $path 'PERSONALCEF_R11_NATIVE_CHROME_MAIN' $search $replace
+
+# ---------------------------------------------------------------------------
+# 2.5) Make the application locale explicit in CefSettings.
+#      The stock cefclient only mirrors --lang into accept_language_list here.
+#      PersonalCEF uses --lang for UI locale and --accept-lang for web language.
+# ---------------------------------------------------------------------------
+$path = Join-Path $cefClientDir 'browser\main_context_impl.cc'
+$search = @'
+  if (command_line_->HasSwitch("lang")) {
+    // Use the same locale for the Accept-Language HTTP request header.
+    CefString(&settings->accept_language_list) =
+        command_line_->GetSwitchValue("lang");
+  }
+'@
+$replace = @'
+  // PERSONALCEF_R9_EXPLICIT_LOCALE
+  // Set the CEF application locale explicitly before CefInitialize. This
+  // controls Chromium/CEF native resource selection (menus, dialogs, etc.).
+  if (command_line_->HasSwitch("lang")) {
+    CefString(&settings->locale) = command_line_->GetSwitchValue("lang");
+  }
+
+  // Keep web Accept-Language independent from the native UI locale.
+  if (command_line_->HasSwitch("accept-lang")) {
+    CefString(&settings->accept_language_list) =
+        command_line_->GetSwitchValue("accept-lang");
+  } else if (command_line_->HasSwitch("lang")) {
+    CefString(&settings->accept_language_list) =
+        command_line_->GetSwitchValue("lang");
+  }
+'@
+Patch-Once $path 'PERSONALCEF_R9_EXPLICIT_LOCALE' $search $replace
+
+# ---------------------------------------------------------------------------
+# 3) Use cefclient's own ClientAppBrowser::Delegate extension point for actual
+#    Chromium command-line switches (SOCKS5, cache, etc.).
+# ---------------------------------------------------------------------------
+$path = Join-Path $cefClientDir 'browser\client_browser.cc'
+$search = '#include "tests/cefclient/browser/root_window_manager.h"'
+$replace = @'
+#include "tests/cefclient/browser/root_window_manager.h"
+#include "personal/personal_runtime.h"  // PERSONALCEF_R8_BROWSER_DELEGATE_INCLUDE
+#include "personal/personal_chrome_handler.h"  // PERSONALCEF_R11_CHROME_HANDLER
+'@
+Patch-Once $path 'PERSONALCEF_R8_BROWSER_DELEGATE_INCLUDE' $search $replace
+
+$search = @'
+  void OnBeforeCommandLineProcessing(
+      CefRefPtr<ClientAppBrowser> app,
+      CefRefPtr<CefCommandLine> command_line) override {
+    // Append Chromium command line parameters if touch events are enabled
+'@
+$replace = @'
+  void OnBeforeCommandLineProcessing(
+      CefRefPtr<ClientAppBrowser> app,
+      CefRefPtr<CefCommandLine> command_line) override {
+    // PERSONALCEF_R8_BROWSER_COMMAND_LINE
+    // This is the official cefclient hook for modifying the real browser
+    // process command line before Chromium initialization.
+    personal::Runtime::Get().ConfigureCommandLine(command_line);
+
+    // PERSONALCEF_R11_DEFAULT_CHROME_POPUPS

@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.21)
+project(PersonalCEFFetch NONE)
+
+get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+file(READ "${PROJECT_ROOT}/CEF-VERSION.txt" CEF_VERSION)
+string(STRIP "${CEF_VERSION}" CEF_VERSION)
+if(CEF_VERSION STREQUAL "")
+  message(FATAL_ERROR "CEF-VERSION.txt is empty")
+endif()
+
+include("${PROJECT_ROOT}/cmake/DownloadCEF.cmake")
+file(MAKE_DIRECTORY "${PROJECT_ROOT}/deps/cef")
+DownloadCEF("windows64" "stable" "${CEF_VERSION}" "${PROJECT_ROOT}/deps/cef")
+message(STATUS "PersonalCEF CEF version: ${CEF_VERSION}")
+message(STATUS "CEF root: ${CEF_ROOT}")
